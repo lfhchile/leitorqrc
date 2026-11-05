@@ -2,6 +2,7 @@ import { Linking, Modal, Pressable, ScrollView, Share, StyleSheet, Text, View } 
 import * as Clipboard from 'expo-clipboard';
 import { parseContent } from '../parseContent';
 import { formatLabel } from '../formats';
+import { EmvDetails } from './EmvDetails';
 
 interface Props { data: string; type: string; onClose: () => void; }
 
@@ -15,13 +16,14 @@ export function ResultSheet({ data, type, onClose }: Props) {
           <Text style={styles.badge}>{formatLabel(type)}</Text>
           <Text style={[styles.badge, styles.badgeAlt]}>{parsed.title}</Text>
         </View>
-        <ScrollView style={{ maxHeight: 320 }}>
+        <ScrollView style={{ maxHeight: parsed.emv ? 480 : 320 }}>
           {parsed.fields.map(f => (
             <View key={f.label} style={styles.field}>
               <Text style={styles.label}>{f.label}</Text>
               <Text style={styles.value} selectable>{f.value}</Text>
             </View>
           ))}
+          {parsed.emv && <EmvDetails emv={parsed.emv} />}
         </ScrollView>
         <View style={styles.actions}>
           {parsed.action && (

@@ -1,7 +1,9 @@
-/** Interpreta o conteúdo de um código (URL, Wi-Fi, contato, Pix, etc.). */
+/** Interpreta o conteúdo de um código (URL, Wi-Fi, contato, pagamento EMV, etc.). */
+import { decodeEmv, looksLikeEmv, type EmvResult } from './emv';
+
 export type ContentKind =
   | 'url' | 'wifi' | 'email' | 'phone' | 'sms' | 'geo'
-  | 'vcard' | 'mecard' | 'event' | 'pix' | 'product' | 'text';
+  | 'vcard' | 'mecard' | 'event' | 'emv' | 'pix' | 'product' | 'text';
 
 export interface ParsedContent {
   kind: ContentKind;
@@ -9,12 +11,14 @@ export interface ParsedContent {
   fields: { label: string; value: string }[];
   /** Link que pode ser aberto com Linking.openURL, se houver. */
   action?: { label: string; url: string };
+  /** Presente quando o conteúdo é um QR de pagamento EMV (Merchant-Presented Mode). */
+  emv?: EmvResult;
 }
 
 const KIND_TITLES: Record<ContentKind, string> = {
   url: 'Link', wifi: 'Rede Wi-Fi', email: 'E-mail', phone: 'Telefone', sms: 'SMS',
   geo: 'Localização', vcard: 'Contato (vCard)', mecard: 'Contato (MeCard)',
-  event: 'Evento', pix: 'Pix', product: 'Produto', text: 'Texto',
+  event: 'Evento', emv: 'Pagamento EMV', pix: 'Pix', product: 'Produto', text: 'Texto',
 };
 
 /** Divide "A:1;B:2;" respeitando escapes com "\". */
@@ -32,20 +36,6 @@ function splitKeyValues(body: string): Record<string, string> {
   return out;
 }
 
-/** Lê campos TLV do padrão EMV (usado pelo Pix). */
-function parseEmv(data: string): Record<string, string> | null {
-  const out: Record<string, string> = {};
-  let i = 0;
-  while (i + 4 <= data.length) {
-    const id = data.slice(i, i + 2);
-    const len = parseInt(data.slice(i + 2, i + 4), 10);
-    if (Number.isNaN(len) || i + 4 + len > data.length) return null;
-    out[id] = data.slice(i + 4, i + 4 + len);
-    i += 4 + len;
-  }
-  return i === data.length ? out : null;
-}
-
 function make(kind: ContentKind, fields: ParsedContent['fields'], action?: ParsedContent['action']): ParsedContent {
   return { kind, title: KIND_TITLES[kind], fields: fields.filter(f => f.value), action };
 }
@@ -53,6 +43,28 @@ function make(kind: ContentKind, fields: ParsedContent['fields'], action?: Parse
 export function parseContent(raw: string, format?: string): ParsedContent {
   const data = raw.trim();
   const upper = data.toUpperCase();
+
+  // QR de pagamento EMV (EMV QRCPS Merchant-Presented Mode v1.1) — Pix, PromptPay, QRIS etc.
+  if (looksLikeEmv(data)) {
+    const emv = decodeEmv(data);
+    const s = emv.summary;
+    const kind: ContentKind = s.pixKey !== undefined ? 'pix' : 'emv';
+    return {
+      ...make(kind, [
+        { label: 'Comerciante', value: s.merchantName ?? '' },
+        { label: 'Nome local', value: s.merchantNameAlt ?? '' },
+        { label: 'Cidade', value: s.city ?? '' },
+        { label: 'País', value: s.country ?? '' },
+        { label: 'Valor', value: s.amountDisplay ?? (s.currency ? `${s.currency} – a informar` : '') },
+        { label: 'Gorjeta/taxa', value: s.tip ?? '' },
+        { label: 'Chave Pix', value: s.pixKey ?? '' },
+        { label: 'Redes de pagamento', value: s.networks.join(', ') },
+        { label: 'Tipo de QR', value: s.initiation ?? '' },
+        { label: 'MCC', value: s.mcc ?? '' },
+      ]),
+      emv,
+    };
+  }
 
   // Códigos de produto (EAN/UPC)
   if (format && /ean|upc|itf/i.test(format) && /^\d+$/.test(data)) {
@@ -144,19 +156,6 @@ export function parseContent(raw: string, format?: string): ParsedContent {
       { label: 'Fim', value: get('DTEND') }, { label: 'Local', value: get('LOCATION') },
       { label: 'Descrição', value: get('DESCRIPTION') },
     ]);
-  }
-
-  // Pix "copia e cola" (BR Code / EMV)
-  if (data.startsWith('000201')) {
-    const emv = parseEmv(data);
-    if (emv && (emv['26'] ?? '').toLowerCase().includes('br.gov.bcb.pix')) {
-      const acct = parseEmv(emv['26']) ?? {};
-      return make('pix', [
-        { label: 'Recebedor', value: emv['59'] ?? '' }, { label: 'Cidade', value: emv['60'] ?? '' },
-        { label: 'Chave', value: acct['01'] ?? '' }, { label: 'Valor (R$)', value: emv['54'] ?? '' },
-        { label: 'Descrição', value: acct['02'] ?? '' }, { label: 'URL dinâmica', value: acct['25'] ?? '' },
-      ]);
-    }
   }
 
   return make('text', [{ label: 'Conteúdo', value: data }]);
